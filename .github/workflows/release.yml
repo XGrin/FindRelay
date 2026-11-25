@@ -1,0 +1,73 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check
+        run: make check
+
+      - name: Build
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          GOOS=darwin GOARCH=arm64 make build VERSION="$TAG"
+          test "$(./dist/findrelay version)" = "findrelay $TAG"
+          test "$(lipo -archs ./dist/findrelay)" = "arm64"
+          codesign -v ./dist/findrelay
+
+      - name: Package
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          ARCHIVE_DIR="findrelay-${TAG}-darwin-arm64"
+          ARCHIVE="${ARCHIVE_DIR}.tar.gz"
+          STAGE="$(mktemp -d)"
+          trap 'rm -rf "$STAGE"' EXIT
+
+          rm -rf dist/release
+          mkdir -p "$STAGE/$ARCHIVE_DIR" dist/release
+          cp dist/findrelay LICENSE README.md README.zh-CN.md "$STAGE/$ARCHIVE_DIR/"
+          chmod 0755 "$STAGE/$ARCHIVE_DIR/findrelay"
+
+          COPYFILE_DISABLE=1 tar -C "$STAGE" -czf "dist/release/$ARCHIVE" "$ARCHIVE_DIR"
+          (
+            cd dist/release
+            shasum -a 256 "$ARCHIVE" > checksums.txt
+            shasum -a 256 -c checksums.txt
+          )
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          ARCHIVE="dist/release/findrelay-${TAG}-darwin-arm64.tar.gz"
+          CHECKSUMS="dist/release/checksums.txt"
+          FLAGS=(--verify-tag --title "$TAG" --generate-notes)
+          if [[ "$TAG" == *-* ]]; then
+            FLAGS+=(--prerelease)
+          fi
+          gh release create "$TAG" "$ARCHIVE" "$CHECKSUMS" "${FLAGS[@]}"
